@@ -1,0 +1,71 @@
+# Local environment and secrets
+.env
+.env.local
+
+# Project developer notes handled by the maintainer
+.freebuff/
+AGENTS.md
+
+# Local runtime data
+data/
+logs/
+
+# Server run logs + preview/index artifacts (incl. stray drive-prefixed names)
+*localgpt-run.log
+*localgpt-index.html
+*lg-run.log
+
+# Model files (large binaries) - downloaded separately
+*.gguf
+*.gguf.*.bin
+models/
+model_cache/
+
+# Generated user content
+generated/*
+!generated/.gitkeep
+uploads/*
+!uploads/.gitkeep
+thumbnails/*
+!thumbnails/.gitkeep
+conversations/*
+!conversations/.gitkeep
+cache/*
+!cache/.gitkeep
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.Python
+*.whl
+*.whl.in
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+project.lock.json
+.opencode/
+
+# Testing artifacts
+.pytest_cache/
+.mypy_cache/
+coverage.xml
+htmlcov/
+
+# OS files
+.DS_Store
+Thumbs.db

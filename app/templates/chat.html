@@ -1,0 +1,213 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="lg-shell" x-data="localgpt.shell()" x-init="init()">
+  <!-- Sidebar -->
+  <aside class="lg-sidebar" :class="{ 'lg-sidebar--open': sidebarOpen }" aria-label="Conversation sidebar">
+    <div class="lg-sidebar-header">
+      <button class="lg-brand" type="button">
+        <img class="lg-logo" src="/static/icons/icon.png" alt="" aria-hidden="true" />
+        <span class="lg-brand-text">LocalGPT</span>
+      </button>
+      <a class="lg-icon-btn" href="/settings" aria-label="Settings" title="Settings">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+      </a>
+    </div>
+
+    <div class="lg-sidebar-section">
+      <button class="lg-new-chat" type="button" @click="newChat()">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="5" x2="12" y2="19"></line>
+          <line x1="5" y1="12" x2="19" y2="12"></line>
+        </svg>
+        New chat
+      </button>
+    </div>
+
+    <div class="lg-sidebar-section lg-conversations">
+      <ul class="lg-convo-list" x-ref="convoList">
+        <template x-for="group in conversationGroups" :key="group.label">
+          <li class="lg-convo-group">
+            <div class="lg-section-label" x-text="group.label"></div>
+            <ul class="lg-convo-list">
+              <template x-for="item in group.items" :key="item.id">
+                <li class="lg-convo-item">
+                  <button
+                    type="button"
+                    class="lg-convo-button"
+                    :class="{ 'lg-convo-active': item.id === activeConversationId }"
+                    @click="selectConversation(item)"
+                    :aria-current="item.id === activeConversationId ? 'true' : 'false'"
+                  >
+                    <span class="lg-convo-title" x-text="item.title"></span>
+                  </button>
+                </li>
+              </template>
+            </ul>
+          </li>
+        </template>
+        <li x-show="!conversations.length" class="lg-empty">
+          <span>No conversations yet</span>
+        </li>
+      </ul>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="lg-main">
+    <header class="lg-header">
+      <div class="lg-header-left">
+        <button
+          class="lg-menu-btn"
+          type="button"
+          aria-label="Toggle conversation sidebar"
+          :aria-expanded="sidebarOpen ? 'true' : 'false'"
+          @click="toggleSidebar()"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <line x1="3" y1="6" x2="21" y2="6"></line>
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <line x1="3" y1="18" x2="21" y2="18"></line>
+          </svg>
+        </button>
+        <h1 class="lg-header-title" x-text="pageTitle"></h1>
+      </div>
+    </header>
+
+    <!-- Empty state: shown when there is no active conversation yet -->
+    <div class="lg-empty-state" x-show="!activeConversationId">
+      <img class="lg-empty-logo lg-empty-logo--dark" src="/static/icons/logo_text_dark.png" alt="" aria-hidden="true" />
+      <img class="lg-empty-logo lg-empty-logo--light" src="/static/icons/logo_text_light.png" alt="" aria-hidden="true" />
+      <h2 class="lg-empty-title">Ask LocalGPT anything</h2>
+      <p class="lg-empty-sub">Upload an image, ask a question, or just start typing below.</p>
+    </div>
+
+    <div class="lg-chat" :class="{ 'lg-chat--empty': !activeConversationId }">
+      <div class="lg-messages" x-ref="messages" x-show="activeConversationId">
+        <template x-for="(message, index) in messages" :key="message.id">
+          <article class="lg-message" :class="message.role">
+            <div class="lg-message-content" x-html="message.html"></div>
+            <div
+              class="lg-msg-actions"
+              x-show="message.role === 'assistant' && index > 0 && index === messages.length - 1 && !streaming"
+              x-cloak
+            >
+              <button type="button" class="lg-msg-action" @click="regenerate()">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <polyline points="23 4 23 10 17 10"></polyline>
+                  <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                </svg>
+                Regenerate
+              </button>
+            </div>
+          </article>
+        </template>
+
+        <div x-show="streaming" class="lg-streaming">
+          <div class="lg-streaming-bubble" x-ref="streamingBubble"></div>
+        </div>
+      </div>
+
+      <div class="lg-composer-wrap">
+        <div class="lg-model-status" x-show="!vlmReady" x-text="vlmStatusText"></div>
+        <form
+          class="lg-composer"
+          @submit.prevent="send()"
+          x-init="attachImageInput($el)"
+        >
+          <div class="lg-attach-area" x-show="attachedPreview">
+            <div class="lg-attach-preview">
+              <img :src="attachedPreview" alt="Attached image preview" />
+              <button type="button" class="lg-attach-remove" @click="clearAttachment()" aria-label="Remove attached image">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="18" y1="6" x2="6" y2="18"></line>
+                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="lg-composer-row">
+            <button
+              type="button"
+              class="lg-tool-btn"
+              title="Attach image"
+              @click="attachInput.click()"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                <polyline points="21 15 16 10 5 21"></polyline>
+              </svg>
+            </button>
+            <input type="file" accept="image/png,image/jpeg,image/webp,image/bmp,image/gif" class="lg-attach-input" x-ref="attachInput" @change="handleFile($event)" />
+
+            <textarea
+              class="lg-composer-input"
+              :class="{ 'lg-composer-input--error': composerError }"
+              x-model="composerText"
+              x-ref="composerInput"
+              placeholder="Ask LocalGPT…"
+              rows="1"
+              :disabled="streaming"
+              aria-label="Message input"
+              @keydown="onComposerKeydown($event)"
+              @input="autoGrow($event)"
+            ></textarea>
+
+            <button
+              type="button"
+              class="lg-send-btn"
+              @click="streaming ? stop() : send()"
+              :disabled="!streaming && !composerText.trim()"
+              :aria-label="streaming ? 'Stop generation' : 'Send message'"
+            >
+              <svg x-show="!streaming" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"></line>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+              </svg>
+              <svg x-show="streaming" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-label="Stop generation">
+                <rect x="6" y="6" width="12" height="12" rx="2"></rect>
+              </svg>
+            </button>
+          </div>
+
+          <div class="lg-composer-error" x-show="composerError" x-text="composerError"></div>
+        </form>
+      </div>
+    </div>
+  </main>
+
+  <!-- Mobile sidebar backdrop (only visible below 900px when sidebar is open) -->
+  <div
+    class="lg-sidebar-backdrop"
+    x-show="sidebarOpen"
+    x-cloak
+    @click="sidebarOpen = false"
+    aria-hidden="true"
+  ></div>
+
+  <!-- Generated image modal -->
+  <div class="lg-modal-backdrop" x-show="imageModal" x-cloak role="dialog" aria-modal="true" aria-label="Generated image">
+    <div class="lg-modal lg-modal--wide">
+      <div class="lg-modal-header">
+        <h2 class="lg-modal-title" x-text="imageModalTitle"></h2>
+        <button class="lg-icon-btn" type="button" @click="closeImageModal()" aria-label="Close image">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+      <div class="lg-modal-body">
+        <img :src="imageModalSrc" alt="Generated image" class="lg-modal-image" />
+        <div class="lg-image-actions">
+          <a :href="imageModalSrc" download class="lg-btn lg-btn--primary">Download</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

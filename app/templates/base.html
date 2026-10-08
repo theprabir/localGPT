@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}LocalGPT{% endblock %}</title>
+  <script>
+    // Apply persisted theme + font before first paint to avoid a flash of the
+    // wrong theme or typeface.
+    (function () {
+      try {
+        var t = localStorage.getItem("localgpt-theme") || "dark";
+        document.documentElement.dataset.theme = t;
+      } catch (e) {
+        document.documentElement.dataset.theme = "dark";
+      }
+      try {
+        var f = localStorage.getItem("localgpt-font") || "default";
+        if (["default", "lato", "garamond"].indexOf(f) === -1) f = "default";
+        document.documentElement.dataset.font = f;
+      } catch (e) {
+        document.documentElement.dataset.font = "default";
+      }
+    })();
+  </script>
+  <link rel="stylesheet" href="/static/css/fonts.css?v={{ asset_version('css/fonts.css') }}" />
+  <link rel="stylesheet" href="/static/css/app.css?v={{ asset_version('css/app.css') }}" />
+  <link rel="icon" type="image/png" href="/static/icons/icon.png" />
+  <script src="/static/js/app.js?v={{ asset_version('js/app.js') }}" defer></script>
+  <script defer src="/static/vendor/alpine.js?v={{ asset_version('vendor/alpine.js') }}"></script>
+</head>
+<body class="lg-body" x-data="localgpt.theme()" x-init="initTheme()">
+  {% block body %}{% endblock %}
+</body>
+</html>
