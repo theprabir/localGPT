@@ -21,6 +21,9 @@ logs/
 models/
 model_cache/
 
+# Third-party runtime binaries (stable-diffusion.cpp) - downloaded separately
+tools/
+
 # Generated user content
 generated/*
 !generated/.gitkeep
