@@ -48,6 +48,11 @@ def create_app(settings=None, logger_instance=None):
     app.state.rm = rm
     app.state.logger = logger_instance
 
+    # Routers depend on get_database(): without this override every request
+    # would build a fresh Database (re-running migrations) and the image-job
+    # service would lose its in-memory job state between requests.
+    app.dependency_overrides[get_database] = _get_database
+
     # Static files and templates must be served from a known root. Use the package
     # directory as the static root so the UI works without a separate web server.
     static_dir = os.path.join(os.path.dirname(__file__), "static")

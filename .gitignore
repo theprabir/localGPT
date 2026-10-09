@@ -15,10 +15,11 @@ logs/
 *localgpt-index.html
 *lg-run.log
 
-# Model files (large binaries) - downloaded separately
+# Model files (large binaries) - downloaded separately (root-level only,
+# so app/models/ source code stays tracked)
 *.gguf
 *.gguf.*.bin
-models/
+/models/
 model_cache/
 
 # Third-party runtime binaries (stable-diffusion.cpp) - downloaded separately

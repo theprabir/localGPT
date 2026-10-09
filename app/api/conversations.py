@@ -10,6 +10,8 @@ from app.models.schemas import (
     ConversationListResponse,
     ConversationResponse,
     ChatMessageResponse,
+    GeneratedImageListResponse,
+    GeneratedImageResponse,
     MessageListResponse,
     AttachmentResponse,
 )
@@ -145,3 +147,38 @@ def list_attachments(
         )
         for a in rows
     ]
+
+
+@router.get(
+    "/conversations/{conversation_id}/images",
+    response_model=GeneratedImageListResponse,
+)
+def list_conversation_images(
+    conversation_id: int,
+    db=Depends(get_database),
+):
+    """Images generated for a conversation, so history can render them inline."""
+    if not db.get_conversation(conversation_id):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    rows = db.list_generated_images_for_conversation(conversation_id)
+    return GeneratedImageListResponse(
+        images=[
+            GeneratedImageResponse(
+                id=row["id"],
+                conversation_id=row["conversation_id"],
+                job_id=row["job_id"],
+                prompt=row["prompt"],
+                stored_filename=row["stored_filename"],
+                thumbnail_filename=row.get("thumbnail_filename"),
+                media_type=row["media_type"],
+                width=row["width"],
+                height=row["height"],
+                status=row["status"],
+                error_text=row.get("error_text"),
+                created_at=row["created_at"],
+                completed_at=row.get("completed_at"),
+            )
+            for row in rows
+        ]
+    )

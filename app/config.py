@@ -28,6 +28,14 @@ class LocalGPTSettings(BaseSettings):
     max_image_size: int = 512
     image_steps: int = 2
 
+    # Image engine (Phase 2): stable-diffusion.cpp runs as an external process,
+    # mirroring llama-server for the VLM (no Python ML framework resident).
+    image_engine: str = "sd_cpp"
+    sd_cli_path: str = ""  # empty = auto-detect tools/sd.cpp/sd-cli(.exe), then PATH
+    image_model_path: str = ""  # empty = auto-detect models/ tree for a GGUF
+    image_job_timeout_seconds: int = 3600  # CPU generation is slow on target hardware
+    image_threads: int = 0  # 0 = let sd.cpp pick (physical cores)
+
     # Upload / file handling limits
     max_upload_size_bytes: int = 10 * 1024 * 1024  # 10 MB
     allowed_image_extensions: tuple[str, ...] = (
@@ -91,7 +99,12 @@ class LocalGPTSettings(BaseSettings):
 
     @property
     def database_path_path(self) -> str:
-        return self.database_path
+        # Follow data_dir unless a dedicated LOCALGPT_DATABASE_PATH overrides
+        # it, so LOCALGPT_DATA_DIR isolation (tests, portable installs) covers
+        # the database file too.
+        if self.database_path and self.database_path != "data/localgpt.db":
+            return self.database_path
+        return os.path.join(self.data_dir, "localgpt.db")
 
 
 def _is_likely_64_bit() -> bool:
@@ -153,6 +166,11 @@ if __name__ == "__main__":
         "image_model",
         "max_image_size",
         "image_steps",
+        "image_engine",
+        "sd_cli_path",
+        "image_model_path",
+        "image_job_timeout_seconds",
+        "image_threads",
         "max_upload_size_bytes",
         "app_name",
         "app_creator",

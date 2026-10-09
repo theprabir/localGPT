@@ -119,6 +119,99 @@ def _event_error(code: str, message: str) -> str:
     return f"data: {json.dumps({'event': 'error', 'code': code, 'message': message})}\n\n"
 
 
+
+# ---------------------------------------------------------------------------
+# Phase 2: unified routing - image intents go to the image engine, not the VLM
+# ---------------------------------------------------------------------------
+
+
+def _classify(request: ChatMessageRequest):
+    """Structured intent (AGENTS.md §13); None means 'treat as chat'."""
+    try:
+        return classify_intent(
+            request.content, has_attachment=bool(request.attachment_id)
+        )
+    except Exception:
+        logger.exception("Intent classification failed; falling back to chat")
+        return None
+
+
+def _try_route_image(
+    request: ChatMessageRequest,
+    conversation_id: int,
+    db,
+    settings,
+) -> dict | None:
+    """
+    Start an image job when the message asks for one.
+
+    Returns ``None`` when the turn belongs to the VLM, otherwise a dict with
+    ``text`` (assistant message to show) and ``job_id`` (None when the engine
+    could not run it — the reason is in ``text``).
+    """
+    if request.regenerate:
+        # Regenerating re-runs a plain assistant answer; image jobs have their
+        # own idempotent flow through /api/image/*.
+        return None
+
+    intent = _classify(request)
+    if intent is None or intent.intent not in ("IMAGE_GENERATION", "IMAGE_EDIT"):
+        return None
+
+    from app.services.image_service import get_image_service
+
+    svc = get_image_service(db=db, settings=settings)
+    is_edit = intent.intent == "IMAGE_EDIT"
+    prompt = (intent.prompt or request.content).strip()
+
+    if is_edit and not request.attachment_id:
+        return {
+            "text": "Attach the image you want to edit, then describe the change.",
+            "job_id": None,
+        }
+
+    ready, reason = svc.engine.available()
+    if not ready:
+        return {
+            "text": reason
+            or "Image generation is not available right now. Check the image model configuration in Settings.",
+            "job_id": None,
+        }
+
+    max_size = getattr(settings, "max_image_size", 512)
+
+    def _clamp(value, default):
+        try:
+            return max(64, min(int(value), max_size))
+        except (TypeError, ValueError):
+            return default
+
+    job = svc.start_generation(
+        conversation_id=conversation_id,
+        prompt=prompt,
+        width=_clamp(intent.width, max_size),
+        height=_clamp(intent.height, max_size),
+        steps=getattr(settings, "image_steps", 2),
+        source_attachment_id=request.attachment_id if is_edit else None,
+        strength=intent.strength if is_edit else None,
+    )
+
+    verb = "Editing image" if is_edit else "Generating image"
+    text = f"{verb}: {prompt}"
+    db.add_message(
+        conversation_id=conversation_id,
+        role="assistant",
+        content=text,
+        raw_content=text,
+    )
+    logger.info(
+        "Routed message to image engine intent=%s job_id=%s",
+        intent.intent,
+        job["job_id"],
+    )
+    return {"text": text, "job_id": job["job_id"]}
+
+
 @router.post("/chat", response_model=ChatMessageResponse)
 def post_chat(
     request: ChatMessageRequest,
@@ -129,10 +222,8 @@ def post_chat(
     Send a chat message and receive a non-streamed assistant response.
     This is retained for simple clients; streaming is preferred for UX.
     """
-    vlm = _get_vlm()
-    if not vlm.ensure_ready():
-        raise HTTPException(status_code=503, detail="VLM is not available")
-
+    # Resolve and persist first: image intents must work even when the VLM is
+    # down, and history must survive a model outage (Phase 1 behaviour).
     conversation_id, new_conversation = _resolve_conversation(request, db)
 
     attachment_context = _attachment_context(request, db)
@@ -155,6 +246,23 @@ def post_chat(
             content=user_content,
             attachment_id=request.attachment_id,
         )
+
+    routed = _try_route_image(request, conversation_id, db, settings)
+    if routed is not None:
+        return ChatMessageResponse(
+            id=0,
+            role="assistant",
+            content=routed["text"],
+            raw_content=routed["text"],
+            attachment_id=None,
+            generated_image_id=None,
+            created_at="",
+            image_job_id=routed["job_id"],
+        )
+
+    vlm = _get_vlm()
+    if not vlm.ensure_ready():
+        raise HTTPException(status_code=503, detail="VLM is not available")
 
     vlm_text = (
         f"{attachment_context}\n\n{request.content}"
@@ -241,6 +349,22 @@ def chat_stream(
             role="user",
             content=user_content,
             attachment_id=request.attachment_id,
+        )
+
+    routed = _try_route_image(request, conversation_id, db, settings)
+    if routed is not None:
+        import json as _json
+
+        payload = {
+            "event": "image_job",
+            "job_id": routed["job_id"],
+            "status": "queued" if routed["job_id"] else "unavailable",
+            "message": routed["text"],
+        }
+        return StreamingResponse(
+            iter([f"data: {_json.dumps(payload)}\n\n", _event_done()]),
+            media_type="text/plain",
+            headers={"Cache-Control": "no-cache"},
         )
 
     if not vlm.ensure_ready():

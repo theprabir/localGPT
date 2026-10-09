@@ -86,7 +86,7 @@
       pageTitle: "LocalGPT",
       sidebarOpen: false,
 
-      // Composer state (single scope owns it — no nested composer component)
+      // Composer state (single scope owns it - no nested composer component)
       composerText: "",
       attachedFile: null,
       attachedPreview: null,
@@ -107,6 +107,7 @@
 
       init() {
         this.loadConversations();
+        this.stopPolling();
         this.checkVlm();
         // Keyboard support: Escape dismisses the topmost open overlay.
         // (The mobile drawer is otherwise closeable only via its backdrop.)
@@ -221,8 +222,11 @@
           fetch(base + "/attachments")
             .then((r) => (r.ok ? r.json() : []))
             .catch(() => []),
+          fetch(base + "/images")
+            .then((r) => (r.ok ? r.json() : { images: [] }))
+            .catch(() => ({ images: [] })),
         ])
-          .then(([msgData, attachments]) => {
+          .then(([msgData, attachments, imageData]) => {
             // attachment_id -> served URL, so history re-displays uploaded images.
             const attachMap = {};
             (attachments || []).forEach((a) => {
@@ -241,6 +245,21 @@
                   m.attachment_id ? attachMap[m.attachment_id] : null
                 ),
               }));
+            // Completed generated images render inline after the transcript.
+            ((imageData && imageData.images) || [])
+              .filter((img) => img.status === "completed")
+              .forEach((img) => {
+                const url =
+                  "/api/generated/" + encodeURIComponent(img.stored_filename);
+                const prompt = (img.prompt || "Generated image").slice(0, 160);
+                this.messages.push({
+                  id: "img-" + img.id,
+                  role: "assistant",
+                  content: "",
+                  html: this.imageFigureHtml(url, prompt),
+                });
+              });
+
             const conv = this.conversations.find(
               (c) => c.id === this.activeConversationId
             );
@@ -399,7 +418,10 @@
                   hadError = true;
                   this.composerError =
                     event.message || "The assistant could not respond.";
+                } else if (event.event === "image_job") {
+                  this.showImageJob(placeholderId, event);
                 }
+
               }
             }
           }
@@ -418,7 +440,22 @@
           this.abortController = null;
 
           const placeholder = this.messages.find((m) => m.id === placeholderId);
-          if (placeholder) {
+          if (placeholder && (placeholder.imageJobId || placeholder.imageJobRendered)) {
+            // Image-job placeholder: the stream ends as soon as the job is
+            // queued, so keep it (and its polling) on screen until the job
+            // finishes and the image, error, or note renders inline.
+            placeholder.content = assistantText || placeholder.content || "";
+            if (placeholder.imageJobError) {
+              placeholder.html =
+                renderMessageHtml(placeholder.content, "assistant") +
+                '<br><span class="lg-image-job-error">' +
+                escapeHtml(placeholder.imageJobError) +
+                "</span>";
+              placeholder.imageJobOngoing = false;
+              delete placeholder.imageJobError;
+              delete placeholder.imageJobId;
+            }
+          } else if (placeholder) {
             if (assistantText) {
               placeholder.content = assistantText;
               placeholder.html = renderMessageHtml(assistantText, "assistant");
@@ -426,7 +463,16 @@
               this.removePlaceholder(placeholderId);
             }
           }
-          if (hadError && !assistantText) {
+          const jobStillRunning = this.messages.some((m) => m.imageJobId);
+          if (!jobStillRunning) {
+            this.stopPolling();
+          }
+          if (
+            hadError &&
+            !assistantText &&
+            !placeholder?.imageJobId &&
+            !(placeholder && placeholder.imageJobRendered)
+          ) {
             this.removePlaceholder(placeholderId);
           }
           this.clearAttachment();
@@ -468,7 +514,7 @@
         if (msg) {
           msg.content = text;
           msg.html =
-            renderMarkdown(text) + '<span class="lg-streaming-cursor">▍</span>';
+            renderMarkdown(text) + '<span class="lg-streaming-cursor">\u258d</span>';
         }
       },
 
@@ -547,6 +593,233 @@
       closeImageModal() {
         this.imageModal = false;
       },
+
+      // ---------- Image job polling ----------
+
+      // Phase 2: streaming responses can emit an "image_job" event once the request
+      // has been classified and the job queued. After that the browser polls
+      // /api/image/jobs/{id} so the conversation can show the generated image inline
+      // without a second round-trip.
+      imageJobIntervalId: null,
+      imageJobs: [],
+
+      showImageJob(placeholderId, event) {
+        const placeholder = this.messages.find((m) => m.id === placeholderId);
+        if (!placeholder) {
+          return;
+        }
+        placeholder.imageJobId = event.job_id || null;
+        placeholder.imageJobOngoing = true;
+        placeholder.imageJobUrl = null;
+        placeholder.imageJobRendered = true;
+        if (event.job_id) {
+          placeholder.html =
+            '<div class="lg-image-job">' +
+            '<div class="lg-image-job-text">' +
+            escapeHtml(event.message || "Generating image...") +
+            "</div></div>";
+          this.scrollDown();
+          this.startPollingForJob(event.job_id, placeholderId);
+          return;
+        }
+        // Not routable (engine unavailable, missing attachment, ...): render
+        // the explanation once as a normal assistant message.
+        placeholder.content = event.message || "";
+        placeholder.imageJobOngoing = false;
+        delete placeholder.imageJobId;
+        delete placeholder.imageJobError;
+        placeholder.html =
+          renderMessageHtml(placeholder.content, "assistant") +
+          '<br><span class="lg-image-job-error">' +
+          escapeHtml(event.message || "") +
+          "</span>";
+        this.scrollDown();
+      },
+
+      startPollingForJob(jobId, placeholderId) {
+        if (!this.imageJobs.some((j) => j.jobId === jobId)) {
+          this.imageJobs.push({ jobId: jobId, placeholderId: placeholderId });
+        }
+        if (this.imageJobIntervalId) {
+          return;
+        }
+        this.imageJobIntervalId = window.setInterval(() => {
+          this.imageJobs.slice().forEach((j) => {
+            this.pollImageJob(j.jobId, j.placeholderId);
+          });
+        }, 1500);
+        this.pollImageJob(jobId, placeholderId);
+      },
+
+      stopPolling() {
+        if (this.imageJobIntervalId) {
+          window.clearInterval(this.imageJobIntervalId);
+          this.imageJobIntervalId = null;
+        }
+        this.imageJobs = [];
+      },
+
+      // Drop one job from the watch list; stop the ticker when none are left.
+      forgetJob(jobId) {
+        this.imageJobs = this.imageJobs.filter((j) => j.jobId !== jobId);
+        if (!this.imageJobs.length && this.imageJobIntervalId) {
+          window.clearInterval(this.imageJobIntervalId);
+          this.imageJobIntervalId = null;
+        }
+      },
+
+      async pollImageJob(jobId, placeholderId) {
+        if (!this.activeConversationId) {
+          return;
+        }
+        try {
+          const res = await fetch(
+            "/api/image/jobs/" + encodeURIComponent(jobId)
+          );
+          if (!res.ok) {
+            if (res.status === 404) {
+              this.forgetJob(jobId);
+              const placeholder = this.messages.find(
+                (m) => m.id === placeholderId
+              );
+              if (placeholder) {
+                placeholder.imageJobOngoing = false;
+                delete placeholder.imageJobId;
+              }
+            }
+            return;
+          }
+          const job = await res.json();
+          this.updateImageJobMessage(placeholderId, job);
+          if (job.status !== "generating" && job.status !== "queued") {
+            this.forgetJob(jobId);
+            this.scrollDown();
+          }
+        } catch (e) {
+          // non-fatal: keep the last rendered state and retry on the next tick
+        }
+      },
+
+      updateImageJobMessage(placeholderId, job) {
+        const placeholder = this.messages.find((m) => m.id === placeholderId);
+        if (!placeholder) {
+          return;
+        }
+        placeholder.imageJobOngoing = job.status === "generating" || job.status === "queued";
+        placeholder.url = job.url || null;
+        if (job.status === "failed") {
+          placeholder.html =
+            renderMessageHtml(assistantTextForPlaceholder(placeholder) || "", "assistant") +
+            '<br><span class="lg-image-job-error">' +
+            escapeHtml(job.error_text || "Image generation failed.") +
+            "</span>";
+          placeholder.imageJobOngoing = false;
+          delete placeholder.imageJobId;
+          return;
+        }
+        if (job.status === "cancelled") {
+          placeholder.html =
+            renderMessageHtml(assistantTextForPlaceholder(placeholder) || "", "assistant") +
+            '<br><span class="lg-image-job-cancelled">Image generation cancelled.</span>';
+          placeholder.imageJobOngoing = false;
+          delete placeholder.imageJobId;
+          return;
+        }
+        if (job.status === "completed" && job.url) {
+          const prompt = job.prompt ? job.prompt.slice(0, 160) : "Generated image";
+          placeholder.html = this.imageFigureHtml(job.url, prompt);
+          placeholder.imageJobOngoing = false;
+          delete placeholder.imageJobId;
+          delete placeholder.imageJobError;
+          return;
+        }
+        const label =
+          job.status === "queued"
+            ? "Queued for image generation..."
+            : (job.progress && job.progress.total > 0
+                ? "Generating image... step " +
+                  String(job.progress.step) +
+                  " of " +
+                  String(job.progress.total)
+                : "Generating image...");
+        const progressLine =
+          job.progress && job.progress.total > 0
+            ? '<div class="lg-image-job-progress">Step ' +
+              String(job.progress.step) +
+              " / " +
+              String(job.progress.total) +
+              "</div>"
+            : "";
+        placeholder.html =
+          '<div class="lg-image-job">' +
+          '<div class="lg-image-job-text">' +
+          escapeHtml(label) +
+          "</div>" +
+          progressLine +
+          (placeholder.imageJobError
+            ? '<div class="lg-image-job-error">' +
+              escapeHtml(placeholder.imageJobError) +
+              "</div>"
+            : "") +
+          '<button type="button" class="lg-image-cancel" @click.stop="cancelImageJob(\'' +
+          escapeHtml(job.job_id) +
+          "', '" +
+          escapeHtml(placeholderId) +
+          "')\">Cancel</button></div>";
+      },
+
+      async cancelImageJob(jobId, placeholderId) {
+        const placeholder = this.messages.find((m) => m.id === placeholderId);
+        if (!placeholder) {
+          return;
+        }
+        try {
+          const res = await fetch("/api/image/jobs/" + encodeURIComponent(jobId) + "/cancel", { method: "POST" });
+          const data = res.ok ? await res.json() : {};
+          placeholder.imageJobCancelledByUser = !!(data && data.cancelled);
+          this.pollImageJob(jobId, placeholderId);
+        } catch (e) {
+          placeholder.imageJobError = "Could not cancel image generation.";
+          this.pollImageJob(jobId, placeholderId);
+        }
+      },
+
+      imageFigureHtml(url, prompt) {
+        const safeUrl = escapeHtml(url);
+        const safePrompt = escapeHtml(prompt || "Generated image");
+        const js = (s) => s.replace(/'/g, "\\'");
+        const view = "showImage('" + js(safeUrl) + "','" + js(safePrompt) + "')";
+        return (
+          '<figure class="lg-image-job">' +
+          '<img src="' +
+          safeUrl +
+          '" alt="' +
+          safePrompt +
+          '" class="lg-generated-image" loading="lazy" @click.stop="' +
+          view +
+          '">' +
+          '<figcaption><span class="lg-image-prompt">' +
+          safePrompt +
+          "</span> " +
+          '<button type="button" class="lg-image-download" @click.stop="' +
+          view +
+          '">View</button> ' +
+          '<a href="' +
+          safeUrl +
+          '" class="lg-image-download" download>Download</a>' +
+          "</figcaption>" +
+          "</figure>"
+        );
+      },
+
+
+      urlFor(url) {
+        return url;
+      },
+
+      assistantTextForPlaceholder(placeholder) {
+        return placeholder.content || "";
+      },
     };
   }
 
@@ -560,14 +833,14 @@
           .then((data) => {
             this.statusRows = [
               { label: "Running", value: String(data.running) },
-              { label: "Model", value: data.vlm_model || "—" },
+              { label: "Model", value: data.vlm_model || "-" },
               {
                 label: "Memory (RSS)",
-                value: data.memory_mb != null ? data.memory_mb + " MB" : "—",
+                value: data.memory_mb != null ? data.memory_mb + " MB" : "-",
               },
               {
                 label: "CPU (process)",
-                value: data.cpu_percent != null ? data.cpu_percent + "%" : "—",
+                value: data.cpu_percent != null ? data.cpu_percent + "%" : "-",
               },
             ];
             this.statusLoaded = true;
@@ -620,7 +893,7 @@
       }
     );
 
-    // 2. Escape everything else — tags below are the only markup that survives.
+    // 2. Escape everything else - tags below are the only markup that survives.
     src = escapeHtml(src);
 
     const out = [];

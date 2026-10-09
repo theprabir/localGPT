@@ -18,8 +18,14 @@ from app.core.security import (
 from app.models.database import get_database
 from app.models.schemas import (
     AttachmentUploadResponse,
+    GeneratedImageJobResult,
     GeneratedImageResponse,
+    ImageEditRequest,
+    ImageGenerateRequest,
+    ImageJobCancelResponse,
+    ImageJobStatusResponse,
 )
+from app.services.image_service import get_image_service
 
 logger = get_logger("localgpt.api.images")
 
@@ -179,4 +185,140 @@ def get_generated_image(
         error_text=row.get("error_text"),
         created_at=row["created_at"],
         completed_at=row.get("completed_at"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: image generation / editing jobs
+# ---------------------------------------------------------------------------
+
+
+def _image_service(
+    db=Depends(get_database),
+    settings=Depends(get_settings),
+):
+    return get_image_service(db=db, settings=settings)
+
+
+def _require_conversation(conversation_id: int, db) -> None:
+    if conversation_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid conversation id")
+    if not db.get_conversation(conversation_id):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+
+def _require_engine(svc, capability: str) -> None:
+    ready, reason = svc.engine.available()
+    if not ready:
+        raise HTTPException(status_code=503, detail=reason or "The image engine is not available")
+    if not svc.engine.capabilities().get(capability, False):
+        raise HTTPException(
+            status_code=501,
+            detail=f"{capability} is not supported by the configured image engine",
+        )
+
+
+@router.post("/image/generate", response_model=GeneratedImageJobResult)
+def generate_image(
+    request: ImageGenerateRequest,
+    db=Depends(get_database),
+    settings=Depends(get_settings),
+    svc=Depends(_image_service),
+):
+    """
+    Queue a text-to-image (or img2img when ``image_id`` is set) job.
+
+    Returns immediately with a job id; the client polls ``/api/image/jobs/{id}``.
+    Generation runs in a worker thread against an external engine process, so a
+    failure can never take the API down (AGENTS.md §14/§17).
+    """
+    _require_conversation(request.conversation_id, db)
+    if request.image_id is not None:
+        if not db.get_generated_image(request.image_id):
+            raise HTTPException(status_code=404, detail="Source image not found")
+        if db.get_generated_image(request.image_id)["conversation_id"] != request.conversation_id:
+            raise HTTPException(status_code=403, detail="Source image belongs to another conversation")
+        _require_engine(svc, "img2img")
+    else:
+        _require_engine(svc, "txt2img")
+
+    job = svc.start_generation(
+        conversation_id=request.conversation_id,
+        prompt=request.prompt,
+        width=request.width,
+        height=request.height,
+        steps=request.steps,
+        source_image_id=request.image_id,
+    )
+    return GeneratedImageJobResult(**job)
+
+
+@router.post("/image/edit", response_model=GeneratedImageJobResult)
+def edit_image(
+    request: ImageEditRequest,
+    db=Depends(get_database),
+    settings=Depends(get_settings),
+    svc=Depends(_image_service),
+):
+    """Queue an image-to-image edit of an uploaded or generated image."""
+    _require_conversation(request.conversation_id, db)
+    _require_engine(svc, "img2img")
+
+    if request.image_id is not None:
+        row = db.get_generated_image(request.image_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Source image not found")
+        if row["conversation_id"] != request.conversation_id:
+            raise HTTPException(status_code=403, detail="Source image belongs to another conversation")
+    elif request.attachment_id is not None:
+        row = db.get_attachment(request.attachment_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Source image not found")
+        if row["conversation_id"] != request.conversation_id:
+            raise HTTPException(status_code=403, detail="Source image belongs to another conversation")
+
+    job = svc.start_generation(
+        conversation_id=request.conversation_id,
+        prompt=request.prompt,
+        width=settings.max_image_size,
+        height=settings.max_image_size,
+        steps=request.steps,
+        source_image_id=request.image_id,
+        source_attachment_id=request.attachment_id,
+        strength=request.strength,
+    )
+    return GeneratedImageJobResult(**job)
+
+
+@router.get("/image/jobs/{job_id}", response_model=ImageJobStatusResponse)
+def image_job_status(
+    job_id: str,
+    db=Depends(get_database),
+    settings=Depends(get_settings),
+    svc=Depends(_image_service),
+):
+    """Poll a job: status, friendly error text, and step progress."""
+    job = svc.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Image job not found")
+    return ImageJobStatusResponse(**job)
+
+
+@router.post("/image/jobs/{job_id}/cancel", response_model=ImageJobCancelResponse)
+def cancel_image_job(
+    job_id: str,
+    db=Depends(get_database),
+    settings=Depends(get_settings),
+    svc=Depends(_image_service),
+):
+    """Cancel a queued or running job. Finished jobs report ``cancelled: false``."""
+    job = svc.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Image job not found")
+    was_cancellable = svc.cancel_job(job_id)
+    refreshed = svc.get_job(job_id) or job
+    return ImageJobCancelResponse(
+        job_id=job_id,
+        status=refreshed.get("status", "failed"),
+        cancelled=was_cancellable,
     )

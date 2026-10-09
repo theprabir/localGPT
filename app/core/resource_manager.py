@@ -142,5 +142,20 @@ class ResourceManager:
         return avail > 1500
 
 
+_singleton: "ResourceManager | None" = None
+_singleton_lock = threading.Lock()
+
+
 def get_resource_manager(settings=None) -> ResourceManager:
-    return ResourceManager(settings=settings)
+    """Process-wide resource manager.
+
+    Lifecycle flags (VLM / image engine ready) are meaningless if every
+    dependency injection builds a fresh instance, so callers share one object.
+    """
+    global _singleton
+    with _singleton_lock:
+        if _singleton is None or (
+            settings is not None and _singleton._settings is not settings
+        ):
+            _singleton = ResourceManager(settings=settings)
+        return _singleton
